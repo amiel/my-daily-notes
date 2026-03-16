@@ -1,0 +1,11 @@
+/*
+  My Daily Notes — styles.css
+  Add your plugin's custom CSS here.
+
+  Tips:
+  - Use Obsidian CSS variables (e.g., var(--text-normal), var(--background-primary))
+    to ensure your styles respect the user's theme.
+  - Scope your selectors to avoid conflicts with other plugins, e.g.:
+      .my-daily-notes-my-element { ... }
+  - Reference built-in variables: https://docs.obsidian.md/Reference/CSS+variables/CSS+variables
+*/
