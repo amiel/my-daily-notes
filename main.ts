@@ -3,11 +3,13 @@ import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, m
 interface MyDailyNotesSettings {
 	dailyNotesFolder: string;
 	dateFormat: string;
+	templateFile: string;
 }
 
 const DEFAULT_SETTINGS: MyDailyNotesSettings = {
 	dailyNotesFolder: 'Daily Notes',
-	dateFormat: 'YYYY-MM-DD',
+	dateFormat: 'YYYY-MM-DD dddd',
+	templateFile: '',
 }
 
 export default class MyDailyNotes extends Plugin {
@@ -16,8 +18,9 @@ export default class MyDailyNotes extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		this.addRibbonIcon('calendar', 'Open daily note', (evt: MouseEvent) => {
-			this.openDailyNote(moment());
+		this.addRibbonIcon('calendar', 'Open daily note (Shift+click for tomorrow)', (evt: MouseEvent) => {
+			const date = evt.shiftKey ? moment().add(1, 'day') : moment();
+			this.openDailyNote(date);
 		});
 
 		this.addCommand({
@@ -29,9 +32,40 @@ export default class MyDailyNotes extends Plugin {
 		});
 
 		this.addSettingTab(new MyDailyNotesSettingTab(this.app, this));
+
+		// When a new empty file is created in the daily notes folder, apply the template
+		this.registerEvent(
+			this.app.vault.on('create', async (file) => {
+				if (!(file instanceof TFile)) return;
+				const folderPath = normalizePath(this.settings.dailyNotesFolder);
+				if (!file.path.startsWith(folderPath + '/')) return;
+				if (!file.path.endsWith('.md')) return;
+
+				// Small delay to let Obsidian finish writing the file
+				await new Promise(r => setTimeout(r, 100));
+
+				const content = await this.app.vault.read(file);
+				if (content.length > 0) return;
+
+				const date = this.parseDateFromPath(file.path);
+				if (!date) return;
+
+				const rendered = await this.renderTemplate(date);
+				if (rendered) {
+					await this.app.vault.modify(file, rendered);
+				}
+			})
+		);
 	}
 
 	onunload() {}
+
+	parseDateFromPath(path: string): moment.Moment | null {
+		const folderPath = normalizePath(this.settings.dailyNotesFolder);
+		const basename = path.slice(folderPath.length + 1).replace(/\.md$/, '');
+		const date = moment(basename, this.settings.dateFormat, true);
+		return date.isValid() ? date : null;
+	}
 
 	getDailyNotePath(date: moment.Moment): string {
 		const filename = date.format(this.settings.dateFormat);
@@ -43,18 +77,71 @@ export default class MyDailyNotes extends Plugin {
 		let file = this.app.vault.getAbstractFileByPath(path);
 
 		if (!file) {
-			// Ensure the folder exists
 			const folderPath = normalizePath(this.settings.dailyNotesFolder);
 			if (!this.app.vault.getAbstractFileByPath(folderPath)) {
 				await this.app.vault.createFolder(folderPath);
 			}
-			file = await this.app.vault.create(path, '');
+			const content = await this.renderTemplate(date);
+			file = await this.app.vault.create(path, content);
 			new Notice(`Created ${path}`);
 		}
 
 		if (file instanceof TFile) {
 			await this.app.workspace.getLeaf(false).openFile(file);
 		}
+	}
+
+	async renderTemplate(date: moment.Moment): Promise<string> {
+		const { templateFile } = this.settings;
+		if (!templateFile) return '';
+
+		const templatePath = normalizePath(templateFile.endsWith('.md') ? templateFile : `${templateFile}.md`);
+		const file = this.app.vault.getAbstractFileByPath(templatePath);
+		if (!(file instanceof TFile)) return '';
+
+		let content = await this.app.vault.read(file);
+
+		// Replace {{date}} and {{date:FORMAT}} variables
+		content = content.replace(/\{\{date(?::([^}]+))?\}\}/g, (_match, format) => {
+			return date.format(format || this.settings.dateFormat);
+		});
+
+		// Replace {{yesterday}}, {{yesterday-link}}, {{tomorrow}}, {{tomorrow-link}} variables
+		content = content.replace(/\{\{yesterday(?::([^}]+))?\}\}/g, (_match, format) => {
+			return moment(date).subtract(1, 'day').format(format || this.settings.dateFormat);
+		});
+		content = content.replace(/\{\{yesterday-link(?::([^}]+))?\}\}/g, (_match, format) => {
+			const name = moment(date).subtract(1, 'day').format(format || this.settings.dateFormat);
+			return `${this.settings.dailyNotesFolder}/${name}`;
+		});
+		content = content.replace(/\{\{tomorrow(?::([^}]+))?\}\}/g, (_match, format) => {
+			return moment(date).add(1, 'day').format(format || this.settings.dateFormat);
+		});
+		content = content.replace(/\{\{tomorrow-link(?::([^}]+))?\}\}/g, (_match, format) => {
+			const name = moment(date).add(1, 'day').format(format || this.settings.dateFormat);
+			return `${this.settings.dailyNotesFolder}/${name}`;
+		});
+
+		// Replace {{unfinished-tasks}} with unchecked tasks from the previous daily note
+		if (content.includes('{{unfinished-tasks}}')) {
+			const tasks = await this.getUnfinishedTasks(date);
+			content = content.replace(/\{\{unfinished-tasks\}\}/g, tasks);
+		}
+
+		return content;
+	}
+
+	async getUnfinishedTasks(date: moment.Moment): Promise<string> {
+		// Look at the previous day's note
+		const prevDate = moment(date).subtract(1, 'day');
+		const prevPath = this.getDailyNotePath(prevDate);
+		const prevFile = this.app.vault.getAbstractFileByPath(prevPath);
+		if (!(prevFile instanceof TFile)) return '';
+
+		const content = await this.app.vault.read(prevFile);
+		const lines = content.split('\n');
+		const unchecked = lines.filter(line => /^\s*- \[ \] /.test(line));
+		return unchecked.join('\n');
 	}
 
 	async loadSettings() {
@@ -97,6 +184,17 @@ class MyDailyNotesSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.dateFormat)
 				.onChange(async (value) => {
 					this.plugin.settings.dateFormat = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Template file')
+			.setDesc('Path to the template file (e.g. Templates/Daily). Supports {{date}}, {{date:FORMAT}}, {{yesterday}}, {{tomorrow}}, and {{unfinished-tasks}}.')
+			.addText(text => text
+				.setPlaceholder('Templates/Daily')
+				.setValue(this.plugin.settings.templateFile)
+				.onChange(async (value) => {
+					this.plugin.settings.templateFile = value;
 					await this.plugin.saveSettings();
 				}));
 	}
