@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, moment } from 'obsidian';
+import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath, moment } from 'obsidian';
 
 interface MyDailyNotesSettings {
 	dailyNotesFolder: string;
@@ -132,13 +132,27 @@ export default class MyDailyNotes extends Plugin {
 	}
 
 	async getUnfinishedTasks(date: moment.Moment): Promise<string> {
-		// Look at the previous day's note
-		const prevDate = moment(date).subtract(1, 'day');
-		const prevPath = this.getDailyNotePath(prevDate);
-		const prevFile = this.app.vault.getAbstractFileByPath(prevPath);
-		if (!(prevFile instanceof TFile)) return '';
+		// Find the most recent daily note before the given date
+		const folderPath = normalizePath(this.settings.dailyNotesFolder);
+		const folder = this.app.vault.getAbstractFileByPath(folderPath);
+		if (!(folder instanceof TFolder)) return '';
 
-		const content = await this.app.vault.read(prevFile);
+		let mostRecentFile: TFile | null = null;
+		let mostRecentDate: moment.Moment | null = null;
+
+		for (const child of folder.children) {
+			if (!(child instanceof TFile) || !child.path.endsWith('.md')) continue;
+			const childDate = this.parseDateFromPath(child.path);
+			if (!childDate || !childDate.isBefore(date, 'day')) continue;
+			if (!mostRecentDate || childDate.isAfter(mostRecentDate, 'day')) {
+				mostRecentDate = childDate;
+				mostRecentFile = child;
+			}
+		}
+
+		if (!mostRecentFile) return '';
+
+		const content = await this.app.vault.read(mostRecentFile);
 		const lines = content.split('\n');
 		const unchecked = lines.filter(line => /^\s*- \[ \] /.test(line));
 		return unchecked.join('\n');
