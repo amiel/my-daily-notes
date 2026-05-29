@@ -33,7 +33,7 @@ export default class MyDailyNotes extends Plugin {
 
 		this.addSettingTab(new MyDailyNotesSettingTab(this.app, this));
 
-		// When a new empty file is created in the daily notes folder, apply the template
+		// When a new daily note is created, apply the template (if empty) and archive old notes
 		this.registerEvent(
 			this.app.vault.on('create', async (file) => {
 				if (!(file instanceof TFile)) return;
@@ -41,19 +41,21 @@ export default class MyDailyNotes extends Plugin {
 				if (!file.path.startsWith(folderPath + '/')) return;
 				if (!file.path.endsWith('.md')) return;
 
+				const date = this.parseDateFromPath(file.path);
+				if (!date) return;
+
 				// Small delay to let Obsidian finish writing the file
 				await new Promise(r => setTimeout(r, 100));
 
 				const content = await this.app.vault.read(file);
-				if (content.length > 0) return;
-
-				const date = this.parseDateFromPath(file.path);
-				if (!date) return;
-
-				const rendered = await this.renderTemplate(date);
-				if (rendered) {
-					await this.app.vault.modify(file, rendered);
+				if (content.length === 0) {
+					const rendered = await this.renderTemplate(date);
+					if (rendered) {
+						await this.app.vault.modify(file, rendered);
+					}
 				}
+
+				await this.archiveOldNotes();
 			})
 		);
 	}
@@ -129,6 +131,38 @@ export default class MyDailyNotes extends Plugin {
 		}
 
 		return content;
+	}
+
+	async archiveOldNotes() {
+		const folderPath = normalizePath(this.settings.dailyNotesFolder);
+		const folder = this.app.vault.getAbstractFileByPath(folderPath);
+		if (!(folder instanceof TFolder)) return;
+
+		const currentMonthStart = moment().startOf('month');
+
+		// Snapshot children since we mutate the folder while iterating
+		const children = [...folder.children];
+		for (const child of children) {
+			if (!(child instanceof TFile) || !child.path.endsWith('.md')) continue;
+			const childDate = this.parseDateFromPath(child.path);
+			if (!childDate) continue;
+			if (!childDate.isBefore(currentMonthStart)) continue;
+
+			const archiveFolderName = childDate.format('YYYY-MM MMMM');
+			const archiveFolderPath = normalizePath(`${folderPath}/${archiveFolderName}`);
+			if (!this.app.vault.getAbstractFileByPath(archiveFolderPath)) {
+				await this.app.vault.createFolder(archiveFolderPath);
+			}
+
+			const newPath = normalizePath(`${archiveFolderPath}/${child.name}`);
+			if (this.app.vault.getAbstractFileByPath(newPath)) continue;
+
+			try {
+				await this.app.fileManager.renameFile(child, newPath);
+			} catch (e) {
+				console.error(`Failed to archive ${child.path}:`, e);
+			}
+		}
 	}
 
 	async getUnfinishedTasks(date: moment.Moment): Promise<string> {
